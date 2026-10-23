@@ -1,0 +1,23 @@
+{
+  "name": "autoswe-sandbox",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "agent.js",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.52.0"
+  },
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "cli": "node agent.js"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
+  }
+}
