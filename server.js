@@ -1,31 +1,154 @@
 import express from 'express';
 import cors from 'cors';
+import session from 'express-session';
+import connectPgSimple from 'connect-pg-simple';
 import dotenv from 'dotenv';
 import { runAgentLoop } from './agent.js';
+import {
+  createRun,
+  saveRunEvent,
+  finishRun,
+} from './runStore.js';
+import { pool } from './db.js';
 
+import authRouter from './auth.js';
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const PgSession = connectPgSimple(session);
 
-// 1. Middleware Setup
+const sessionStore = new PgSession({
+  pool,
+  tableName: 'user_sessions',
+  createTableIfMissing: true,
+  pruneSessionInterval: 15 * 60,
+});
+
 app.use(cors({
-  origin: '*', // Allow React client (Vite/Next.js) to connect from any local port
+  origin: 'http://localhost:5173',
+  credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json({ limit: '2mb' }));
 
-// 2. Health Check Endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'AutoSWE Node.js Orchestrator',
-    model: process.env.LLM_MODEL || 'qwen2.5-coder:14b',
-    sandboxUrl: process.env.SANDBOX_API_URL || 'http://localhost:8080/api/v1/execute',
-    maxIterations: parseInt(process.env.MAX_ITERATIONS || '5', 10)
-  });
+app.use(session({
+  store: sessionStore,
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    maxAge: 1000 * 60 * 60 * 24,
+  },
+}));
+
+app.use('/api/auth', authRouter);
+
+app.get('/api/agent/runs', async (req, res) => {
+  // Verify authentication
+  if (!req.session?.userId) {
+    return res.status(401).json({
+      error: 'You must be logged in to view agent runs.',
+    });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT
+         id,
+         problem,
+         status,
+         iterations,
+         final_answer,
+         started_at,
+         completed_at
+       FROM agent_runs
+       WHERE user_id = $1
+       ORDER BY started_at DESC
+       LIMIT 50`,
+      [req.session.userId]
+    );
+
+    return res.json({ runs: result.rows });
+
+  } catch (error) {
+    console.error(
+      '[Database] Failed to fetch agent runs:',
+      error.message
+    );
+
+    return res.status(500).json({
+      error: 'Failed to fetch agent runs.',
+    });
+  }
 });
+
+
+// Get execution events for a specific run
+app.get('/api/agent/runs/:id/events', async (req, res) => {
+
+  // 1. Verify authentication
+  if (!req.session?.userId) {
+    return res.status(401).json({
+      error: 'You must be logged in to view agent events.',
+    });
+  }
+
+  // 2. Validate run ID
+  const runId = req.params.id;
+
+  if (!/^\d+$/.test(runId)) {
+    return res.status(400).json({
+      error: 'Invalid run ID.',
+    });
+  }
+
+  try {
+    // 3. Verify that this run belongs to the logged-in user
+    const runResult = await pool.query(
+      `SELECT id
+       FROM agent_runs
+       WHERE id = $1 AND user_id = $2`,
+      [runId, req.session.userId]
+    );
+
+    if (runResult.rowCount === 0) {
+      return res.status(404).json({
+        error: 'Agent run not found.',
+      });
+    }
+
+    // 4. Fetch saved events for this run
+    const eventsResult = await pool.query(
+      `SELECT id, event_type, payload, created_at
+       FROM agent_events
+       WHERE run_id = $1
+       ORDER BY id ASC`,
+      [runId]
+    );
+
+    // 5. Return events to frontend
+    return res.json({
+      runId,
+      events: eventsResult.rows,
+    });
+
+  } catch (error) {
+    console.error(
+      '[Database] Failed to fetch agent events:',
+      error.message
+    );
+
+    return res.status(500).json({
+      error: 'Failed to fetch agent events.',
+    });
+  }
+});
+
 
 /**
  * Helper function to format and flush a Server-Sent Event (SSE) packet.
@@ -48,6 +171,11 @@ function sendSSE(res, eventType, payload) {
  * Accepts { "prompt": "..." } in the JSON body and streams real-time ReAct telemetry.
  */
 app.post('/api/agent/stream', async (req, res) => {
+  if (!req.session?.userId) {
+    return res.status(401).json({
+      error: 'You must be logged in to start an agent run.',
+    });
+  }
   const { prompt } = req.body;
 
   if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
@@ -71,10 +199,17 @@ app.post('/api/agent/stream', async (req, res) => {
     }
   }, 15000);
 
-  req.on('close', () => {
-    isClientConnected = false;
+  // req.on('close', () => {
+  //   isClientConnected = false;
+  //   clearInterval(heartbeatTimer);
+  //   console.log('🔌 [SSE Client Disconnected]');
+  // });
+
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      console.log('🔌 [SSE Client Disconnected]');
+    }
     clearInterval(heartbeatTimer);
-    console.log('🔌 [SSE Client Disconnected]');
   });
 
   // Initial Handshake Event
@@ -84,31 +219,67 @@ app.post('/api/agent/stream', async (req, res) => {
     model: process.env.LLM_MODEL
   });
 
+  let run = null;
   try {
-    // Execute the ReAct loop and pipe every internal event directly to the SSE stream
+    console.log('[AUTH DEBUG] Session ID:', req.sessionID);
+    console.log('[AUTH DEBUG] User ID:', req.session?.userId);
+    run = await createRun(prompt, req.session?.userId || null);
+
+    // Execute the agent and stream its events.
     const finalSummary = await runAgentLoop(prompt, (agentEvent) => {
       if (!isClientConnected) return;
+
+      // Keep the existing SSE event names unchanged.
       sendSSE(res, agentEvent.type, agentEvent);
+
+      // Persist the event without blocking the SSE stream.
+      saveRunEvent(run.id, agentEvent).catch((error) => {
+        console.error('[Database] Failed to save agent event:', error.message);
+      });
     });
 
-    // Send final completion signal before closing the stream
+    // Save the final run status.
+    await finishRun(run.id, {
+      status: finalSummary.success ? 'passed' : 'failed',
+      iterations: finalSummary.iterationsUsed,
+      finalAnswer: finalSummary.finalAnswer,
+    });
+
+    // Send the existing completion event.
     if (isClientConnected) {
       sendSSE(res, 'STREAM_COMPLETE', {
         type: 'STREAM_COMPLETE',
         success: finalSummary.success,
         iterationsUsed: finalSummary.iterationsUsed,
-        finalAnswer: finalSummary.finalAnswer
+        finalAnswer: finalSummary.finalAnswer,
       });
     }
   } catch (error) {
     console.error('💥 [Orchestrator Stream Error]:', error.message);
+
+    // Mark the run as errored if a database record was created.
+    if (run) {
+      try {
+        await finishRun(run.id, {
+          status: 'error',
+          iterations: 0,
+          finalAnswer: error.message,
+        });
+      } catch (dbError) {
+        console.error('[Database] Failed to update run:', dbError.message);
+      }
+    }
+
     if (isClientConnected) {
       sendSSE(res, 'ERROR', {
         type: 'ERROR',
-        message: error.message || 'Unexpected error during agent execution.'
+        message: error.message || 'Unexpected error during agent execution.',
       });
     }
-  } finally {
+  }
+
+
+  finally {
     clearInterval(heartbeatTimer);
     if (!res.writableEnded) {
       res.end();
@@ -127,7 +298,7 @@ app.get('/api/agent/stream', async (req, res) => {
   }
   req.body = { prompt };
   // Forward to the POST handler logic
-  return app._router.handle(Object.assign(req, { method: 'POST' }), res, () => {});
+  return app._router.handle(Object.assign(req, { method: 'POST' }), res, () => { });
 });
 
 /**
@@ -136,7 +307,15 @@ app.get('/api/agent/stream', async (req, res) => {
  * To use this mock, temporarily set SANDBOX_API_URL=http://localhost:3001/api/v1/mock-execute in your .env
  */
 app.post('/api/v1/mock-execute', async (req, res) => {
+
+  if (!req.session?.userId) {
+    return res.status(401).json({
+      error: 'You must be logged in to execute code.',
+    });
+  }
+
   const { source_code = '', stdin = '', expected_output = '' } = req.body;
+
 
   console.log(`🧪 [Mock Sandbox]: Received C++ code (${source_code.length} bytes)`);
   await new Promise((resolve) => setTimeout(resolve, 600)); // Simulate compile/run latency

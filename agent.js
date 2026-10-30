@@ -2,6 +2,16 @@ import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
 
+import fs from 'fs';
+import path from 'path';
+
+const REPO_DIR = path.resolve('./repo');
+if (!fs.existsSync(REPO_DIR)) {
+  fs.mkdirSync(REPO_DIR, { recursive: true });
+  fs.writeFileSync(path.join(REPO_DIR, 'discount.cpp'), `#include <iostream>\nint main() {\n  int p, d; std::cin >> p >> d;\n  std::cout << (p + d) << std::endl; // BUG: should be p - d\n  return 0;\n}`);
+}
+
+
 
 // 1. Load environment variables
 dotenv.config();
@@ -23,34 +33,69 @@ const openai = new OpenAI({
 });
 
 // Shared request limiter: at least 20 seconds between request starts.
-const REQUEST_GAP_MS = 21_000;
+// const REQUEST_GAP_MS = 21_000;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// let requestQueue = Promise.resolve();
+// let lastRequestStartedAt = 0;
+
+// async function chatCompletionWithRateLimit(params) {
+//   const task = requestQueue.then(async () => {
+//     const elapsed = Date.now() - lastRequestStartedAt;
+//     const waitMs = Math.max(0, REQUEST_GAP_MS - elapsed);
+
+//     if (waitMs > 0) {
+//       console.log(`[Rate limiter] Waiting ${(waitMs / 1000).toFixed(1)}s`);
+//       await sleep(waitMs);
+//     }
+
+//     lastRequestStartedAt = Date.now();
+//     console.log('[Rate limiter] Sending LLM request');
+
+//     return openai.chat.completions.create(params);
+//   });
+
+//   requestQueue = task.then(
+//     () => undefined,
+//     () => undefined
+//   );
+
+//   return task;
+// }
+
+import os from 'os';
+const LIMIT_FILE = path.join(os.tmpdir(), 'autoswe_ratelimit.txt');
+const REQUEST_GAP_MS = 21_000; // Max ~2.8 requests/min (< 5 RPM limit)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let requestQueue = Promise.resolve();
-let lastRequestStartedAt = 0;
 
-async function chatCompletionWithRateLimit(params) {
+async function chatCompletionWithRateLimit(params, onEvent) {
   const task = requestQueue.then(async () => {
-    const elapsed = Date.now() - lastRequestStartedAt;
-    const waitMs = Math.max(0, REQUEST_GAP_MS - elapsed);
+    const lastTime = fs.existsSync(LIMIT_FILE) ? Number(fs.readFileSync(LIMIT_FILE, 'utf8')) : 0;
+    const waitMs = Math.max(0, REQUEST_GAP_MS - (Date.now() - lastTime));
 
     if (waitMs > 0) {
       console.log(`[Rate limiter] Waiting ${(waitMs / 1000).toFixed(1)}s`);
+      onEvent?.({ type: 'THOUGHT', content: `⏳ Rate limiter: cooling down ${(waitMs / 1000).toFixed(1)}s (staying under 5 RPM)...` });
       await sleep(waitMs);
     }
 
-    lastRequestStartedAt = Date.now();
-    console.log('[Rate limiter] Sending LLM request');
-
-    return openai.chat.completions.create(params);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log('[Rate limiter] Sending LLM request');
+        return await openai.chat.completions.create(params);
+      } catch (err) {
+        if (err.status === 429 && attempt < 3) {
+          console.log('[Rate limiter] 429 hit! Cooling down 35s...');
+          await sleep(35_000);
+        } else throw err;
+      } finally {
+        fs.writeFileSync(LIMIT_FILE, String(Date.now()));
+      }
+    }
   });
-
-  requestQueue = task.then(
-    () => undefined,
-    () => undefined
-  );
-
+  requestQueue = task.catch(() => { });
   return task;
 }
 
@@ -66,10 +111,15 @@ OPERATIONAL PROTOCOL (ReAct Pattern):
    - If compilation fails (status: "COMPILATION_ERROR"), read the exact line numbers and compiler diagnostics in \`stderr\`. Fix syntax or type errors immediately.
    - If a runtime crash occurs (e.g., SIGSEGV / Exit Code 139, SIGABRT, or Time Limit Exceeded), inspect pointer arithmetic, vector out-of-bounds accesses, or infinite recursion.
    - If test cases fail (status: "WRONG_ANSWER"), compare \`stdout\` against expected output and fix your algorithmic logic.
-4. TERMINATE: Once the sandbox returns \`passed: true\` (all tests passing), stop calling tools and provide a concise final summary of your solution and its complexity.`;
+4. TERMINATE: Once the sandbox returns \`passed: true\` (all tests passing), stop calling tools and provide a concise final summary of your solution and its complexity.
+You can also inspect and patch ./repo files using list_files, read_file, and write_file.`;
 
 // 4. Define the Strict JSON Schema for the `execute_cpp_code` Tool
 const tools = [
+  { type: 'function', function: { name: 'list_files', description: 'List files in ./repo', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'read_file', description: 'Read file in ./repo', parameters: { type: 'object', properties: { filepath: { type: 'string' } }, required: ['filepath'] } } },
+  { type: 'function', function: { name: 'write_file', description: 'Write file in ./repo', parameters: { type: 'object', properties: { filepath: { type: 'string' }, content: { type: 'string' } }, required: ['filepath', 'content'] } } },
+
   {
     type: 'function',
     function: {
@@ -201,7 +251,7 @@ export async function runAgentLoop(problemPrompt, onEvent = () => { }) {
         tools: tools,
         tool_choice: 'auto',
         temperature: 0.1 // Low temperature for deterministic code generation
-      });
+      }, onEvent);
     } catch (llmError) {
       console.error(`❌ [LLM API Error]:`, llmError.message);
       onEvent({ type: 'ERROR', message: llmError.message });
@@ -240,14 +290,14 @@ export async function runAgentLoop(problemPrompt, onEvent = () => { }) {
     for (const toolCall of assistantMessage.tool_calls) {
       const { id: toolCallId, function: fn } = toolCall;
 
-      if (fn.name !== 'execute_cpp_code') {
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCallId,
-          content: JSON.stringify({ error: `Unknown tool "${fn.name}". Only execute_cpp_code is supported.` })
-        });
-        continue;
-      }
+      // if (fn.name !== 'execute_cpp_code') {
+      //   messages.push({
+      //     role: 'tool',
+      //     tool_call_id: toolCallId,
+      //     content: JSON.stringify({ error: `Unknown tool "${fn.name}". Only execute_cpp_code is supported.` })
+      //   });
+      //   continue;
+      // }
 
       // Safely parse the LLM's JSON arguments
       let parsedArgs;
@@ -264,6 +314,23 @@ export async function runAgentLoop(problemPrompt, onEvent = () => { }) {
             stderr: `Failed to parse tool JSON arguments: ${parseError.message}. Ensure strings and newlines in cpp_source_code are properly escaped.`
           })
         });
+        continue;
+      }
+
+      if (fn.name !== 'execute_cpp_code') {
+        let out = '';
+        if (fn.name === 'list_files') {
+          out = JSON.stringify({ files: fs.readdirSync(REPO_DIR) });
+          onEvent({ type: 'THOUGHT', iteration, content: `📂 Repo files: ${out}` });
+        } else if (fn.name === 'read_file') {
+          out = fs.readFileSync(path.join(REPO_DIR, path.basename(parsedArgs.filepath)), 'utf8');
+          onEvent({ type: 'TOOL_CALL', iteration, reasoning: `Read ${parsedArgs.filepath}`, code: out });
+        } else if (fn.name === 'write_file') {
+          fs.writeFileSync(path.join(REPO_DIR, path.basename(parsedArgs.filepath)), parsedArgs.content, 'utf8');
+          out = JSON.stringify({ patched: parsedArgs.filepath });
+          onEvent({ type: 'TOOL_CALL', iteration, reasoning: `Patched ${parsedArgs.filepath}`, code: parsedArgs.content });
+        }
+        messages.push({ role: 'tool', tool_call_id: toolCallId, content: out });
         continue;
       }
 
