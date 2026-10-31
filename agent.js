@@ -1,17 +1,17 @@
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
-
-
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 
 const REPO_DIR = path.resolve('./repo');
 if (!fs.existsSync(REPO_DIR)) {
   fs.mkdirSync(REPO_DIR, { recursive: true });
-  fs.writeFileSync(path.join(REPO_DIR, 'discount.cpp'), `#include <iostream>\nint main() {\n  int p, d; std::cin >> p >> d;\n  std::cout << (p + d) << std::endl; // BUG: should be p - d\n  return 0;\n}`);
+  fs.writeFileSync(
+    path.join(REPO_DIR, 'discount.cpp'),
+    `#include <iostream>\nint main() {\n  int p, d; std::cin >> p >> d;\n  std::cout << (p + d) << std::endl; // BUG: should be p - d\n  return 0;\n}`
+  );
 }
-
-
 
 // 1. Load environment variables
 dotenv.config();
@@ -20,64 +20,46 @@ const MAX_ITERATIONS = parseInt(process.env.MAX_ITERATIONS || '5', 10);
 const SANDBOX_API_URL = process.env.SANDBOX_API_URL || 'http://localhost:8080/api/v1/execute';
 const LLM_MODEL = process.env.LLM_MODEL || 'gpt-4o';
 
-// 2. Initialize OpenAI Client (Supports both Cloud APIs and Local Ollama)
-// const openai = new OpenAI({
-//   baseURL: process.env.LLM_BASE_URL || 'https://api.openai.com/v1',
-//   apiKey: process.env.LLM_API_KEY || 'ollama', // Ollama requires a non-empty dummy string
-// });
-
+// 2. Initialize OpenAI Client
 const openai = new OpenAI({
   baseURL: process.env.LLM_BASE_URL || 'https://api.openai.com/v1',
   apiKey: process.env.LLM_API_KEY || 'ollama',
   maxRetries: 0,
 });
 
-// Shared request limiter: at least 20 seconds between request starts.
-// const REQUEST_GAP_MS = 21_000;
-
-// const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// let requestQueue = Promise.resolve();
-// let lastRequestStartedAt = 0;
-
-// async function chatCompletionWithRateLimit(params) {
-//   const task = requestQueue.then(async () => {
-//     const elapsed = Date.now() - lastRequestStartedAt;
-//     const waitMs = Math.max(0, REQUEST_GAP_MS - elapsed);
-
-//     if (waitMs > 0) {
-//       console.log(`[Rate limiter] Waiting ${(waitMs / 1000).toFixed(1)}s`);
-//       await sleep(waitMs);
-//     }
-
-//     lastRequestStartedAt = Date.now();
-//     console.log('[Rate limiter] Sending LLM request');
-
-//     return openai.chat.completions.create(params);
-//   });
-
-//   requestQueue = task.then(
-//     () => undefined,
-//     () => undefined
-//   );
-
-//   return task;
-// }
-
-import os from 'os';
+// Shared 21s Rate Limiter
 const LIMIT_FILE = path.join(os.tmpdir(), 'autoswe_ratelimit.txt');
 const REQUEST_GAP_MS = 21_000; // Max ~2.8 requests/min (< 5 RPM limit)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let requestQueue = Promise.resolve();
 
-async function chatCompletionWithRateLimit(params, onEvent) {
+function summarizeReasoning(rawText = '') {
+  const cleaned = String(rawText)
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/```[\s\S]*?```/g, '[code block]')
+    .trim();
+  if (!cleaned) return '';
+  const firstLines = cleaned.split('\n').filter(Boolean).slice(0, 2).join(' ');
+  return firstLines.length > 260 ? `${firstLines.slice(0, 257)}...` : firstLines;
+}
+
+async function chatCompletionWithRateLimit(params, onEvent, iteration = 0) {
   const task = requestQueue.then(async () => {
     const lastTime = fs.existsSync(LIMIT_FILE) ? Number(fs.readFileSync(LIMIT_FILE, 'utf8')) : 0;
     const waitMs = Math.max(0, REQUEST_GAP_MS - (Date.now() - lastTime));
 
     if (waitMs > 0) {
-      console.log(`[Rate limiter] Waiting ${(waitMs / 1000).toFixed(1)}s`);
-      onEvent?.({ type: 'THOUGHT', content: `⏳ Rate limiter: cooling down ${(waitMs / 1000).toFixed(1)}s (staying under 5 RPM)...` });
+      const waitSec = (waitMs / 1000).toFixed(1);
+      console.log(`[Rate limiter] Waiting ${waitSec}s`);
+      onEvent?.({
+        schemaVersion: 2,
+        type: 'THOUGHT',
+        category: 'rate_limit',
+        iteration,
+        waitMs,
+        summary: `Rate limiter cooldown: waiting ${waitSec}s (5 RPM guard)`,
+        content: `⏳ Rate limiter: cooling down ${waitSec}s (staying under 5 RPM)...`
+      });
       await sleep(waitMs);
     }
 
@@ -88,6 +70,15 @@ async function chatCompletionWithRateLimit(params, onEvent) {
       } catch (err) {
         if (err.status === 429 && attempt < 3) {
           console.log('[Rate limiter] 429 hit! Cooling down 35s...');
+          onEvent?.({
+            schemaVersion: 2,
+            type: 'THOUGHT',
+            category: 'rate_limit',
+            iteration,
+            waitMs: 35000,
+            summary: `HTTP 429 rate limit hit (Attempt ${attempt}/3). Cooling down 35s...`,
+            content: `⏳ Rate limiter: HTTP 429 hit, cooling down 35.0s before retry #${attempt + 1}...`
+          });
           await sleep(35_000);
         } else throw err;
       } finally {
@@ -95,10 +86,9 @@ async function chatCompletionWithRateLimit(params, onEvent) {
       }
     }
   });
-  requestQueue = task.catch(() => { });
+  requestQueue = task.catch(() => {});
   return task;
 }
-
 
 // 3. Define the System Prompt for the Autonomous C++ SWE Agent
 const SYSTEM_PROMPT = `You are an autonomous Principal C++ Software Engineering Agent.
@@ -114,12 +104,11 @@ OPERATIONAL PROTOCOL (ReAct Pattern):
 4. TERMINATE: Once the sandbox returns \`passed: true\` (all tests passing), stop calling tools and provide a concise final summary of your solution and its complexity.
 You can also inspect and patch ./repo files using list_files, read_file, and write_file.`;
 
-// 4. Define the Strict JSON Schema for the `execute_cpp_code` Tool
+// 4. Define the Strict JSON Schema for Tools
 const tools = [
   { type: 'function', function: { name: 'list_files', description: 'List files in ./repo', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'read_file', description: 'Read file in ./repo', parameters: { type: 'object', properties: { filepath: { type: 'string' } }, required: ['filepath'] } } },
   { type: 'function', function: { name: 'write_file', description: 'Write file in ./repo', parameters: { type: 'object', properties: { filepath: { type: 'string' }, content: { type: 'string' } }, required: ['filepath', 'content'] } } },
-
   {
     type: 'function',
     function: {
@@ -155,7 +144,6 @@ const tools = [
 
 /**
  * Dispatches C++ source code and test inputs to the Go + Docker + Isolate Sandbox.
- * Includes fallback mock support if the Go server is offline during initial testing.
  */
 async function callGoSandbox({ cpp_source_code, stdin_input, expected_output }) {
   try {
@@ -170,7 +158,7 @@ async function callGoSandbox({ cpp_source_code, stdin_input, expected_output }) 
         time_limit_ms: 2000,
         memory_limit_kb: 262144 // 256 MB
       }),
-      signal: AbortSignal.timeout(10000) // Hard 10s network timeout
+      signal: AbortSignal.timeout(10000)
     });
 
     if (!response.ok) {
@@ -178,10 +166,7 @@ async function callGoSandbox({ cpp_source_code, stdin_input, expected_output }) 
       throw new Error(`Sandbox HTTP ${response.status}: ${errorText}`);
     }
 
-    // Expected JSON structure from Go Sandbox:
-    // { passed: boolean, status: string, exit_code: number, stdout: string, stderr: string, execution_time_ms: number }
     return await response.json();
-
   } catch (error) {
     console.error(`[Sandbox Network Error]: ${error.message}`);
     return {
@@ -199,7 +184,6 @@ async function callGoSandbox({ cpp_source_code, stdin_input, expected_output }) 
  * Formats the Go Sandbox response into a structured diagnostic payload for the LLM context window.
  */
 function formatSandboxFeedback(result) {
-  // Truncate overly massive outputs (e.g., infinite print loops) to protect context window limits
   const MAX_LOG_LEN = 4000;
   const cleanStdout = (result.stdout || '').slice(0, MAX_LOG_LEN);
   const cleanStderr = (result.stderr || '').slice(0, MAX_LOG_LEN);
@@ -221,10 +205,8 @@ function formatSandboxFeedback(result) {
 
 /**
  * Core Asynchronous ReAct Loop
- * @param {string} problemPrompt - The C++ problem description and test constraints.
- * @param {function} onEvent - Optional callback for streaming real-time telemetry (used later for React SSE).
  */
-export async function runAgentLoop(problemPrompt, onEvent = () => { }) {
+export async function runAgentLoop(problemPrompt, onEvent = () => {}) {
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: problemPrompt }
@@ -240,42 +222,55 @@ export async function runAgentLoop(problemPrompt, onEvent = () => { }) {
   while (iteration < MAX_ITERATIONS) {
     iteration++;
     console.log(`\n--- [Iteration ${iteration}/${MAX_ITERATIONS}] Requesting LLM Reasoning ---`);
-    onEvent({ type: 'ITERATION_START', iteration, maxIterations: MAX_ITERATIONS });
+    onEvent({
+      schemaVersion: 2,
+      type: 'ITERATION_START',
+      iteration,
+      maxIterations: MAX_ITERATIONS,
+      message: `Starting Iteration ${iteration} of ${MAX_ITERATIONS}`
+    });
 
     let response;
     try {
-      // response = await openai.chat.completions.create({
-      response = await chatCompletionWithRateLimit({
-        model: LLM_MODEL,
-        messages: messages,
-        tools: tools,
-        tool_choice: 'auto',
-        temperature: 0.1 // Low temperature for deterministic code generation
-      }, onEvent);
+      response = await chatCompletionWithRateLimit(
+        {
+          model: LLM_MODEL,
+          messages: messages,
+          tools: tools,
+          tool_choice: 'auto',
+          temperature: 0.1
+        },
+        onEvent,
+        iteration
+      );
     } catch (llmError) {
       console.error(`❌ [LLM API Error]:`, llmError.message);
-      onEvent({ type: 'ERROR', message: llmError.message });
       throw llmError;
     }
 
     const assistantMessage = response.choices[0].message;
-
-    // 1. Append the assistant's exact response (including any tool_calls) to conversation history
     messages.push(assistantMessage);
 
-    // Log internal monologue if the LLM emitted plain text alongside or instead of a tool call
     if (assistantMessage.content) {
       console.log(`🧠 [Agent Thought]:\n${assistantMessage.content}\n`);
-      onEvent({ type: 'THOUGHT', iteration, content: assistantMessage.content });
+      onEvent({
+        schemaVersion: 2,
+        type: 'THOUGHT',
+        category: 'reasoning',
+        iteration,
+        summary: summarizeReasoning(assistantMessage.content),
+        content: assistantMessage.content
+      });
     }
 
-    // 2. Check if the LLM decided it is finished (No tool calls emitted)
     if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
       console.log(`✅ [Agent Terminated Loop]: Final answer produced on iteration ${iteration}.`);
       onEvent({
+        schemaVersion: 2,
         type: 'FINAL_ANSWER',
         iteration,
         solved: isSolved,
+        summary: summarizeReasoning(assistantMessage.content) || 'Agent completed reasoning loop.',
         content: assistantMessage.content
       });
       return {
@@ -286,25 +281,24 @@ export async function runAgentLoop(problemPrompt, onEvent = () => { }) {
       };
     }
 
-    // 3. Process all tool calls requested by the LLM in this turn
     for (const toolCall of assistantMessage.tool_calls) {
       const { id: toolCallId, function: fn } = toolCall;
 
-      // if (fn.name !== 'execute_cpp_code') {
-      //   messages.push({
-      //     role: 'tool',
-      //     tool_call_id: toolCallId,
-      //     content: JSON.stringify({ error: `Unknown tool "${fn.name}". Only execute_cpp_code is supported.` })
-      //   });
-      //   continue;
-      // }
-
-      // Safely parse the LLM's JSON arguments
       let parsedArgs;
       try {
         parsedArgs = JSON.parse(fn.arguments);
       } catch (parseError) {
         console.warn(`⚠️ [Malformed Tool JSON]: Asking LLM to regenerate valid JSON.`);
+        onEvent({
+          schemaVersion: 2,
+          type: 'TOOL_CALL',
+          iteration,
+          tool: fn.name || 'unknown_tool',
+          toolCallId,
+          status: 'MALFORMED_TOOL_ARGUMENTS',
+          reasoning: `Malformed tool JSON arguments (${parseError.message}). Requesting self-correction.`,
+          error: parseError.message
+        });
         messages.push({
           role: 'tool',
           tool_call_id: toolCallId,
@@ -320,114 +314,152 @@ export async function runAgentLoop(problemPrompt, onEvent = () => { }) {
       if (fn.name !== 'execute_cpp_code') {
         let out = '';
         if (fn.name === 'list_files') {
-          out = JSON.stringify({ files: fs.readdirSync(REPO_DIR) });
-          onEvent({ type: 'THOUGHT', iteration, content: `📂 Repo files: ${out}` });
+          const files = fs.readdirSync(REPO_DIR);
+          out = JSON.stringify({ files });
+          onEvent({
+            schemaVersion: 2,
+            type: 'TOOL_CALL',
+            iteration,
+            tool: 'list_files',
+            toolCallId,
+            args: { directory: './repo' },
+            reasoning: `Listed ${files.length} file(s) in ./repo: ${files.join(', ')}`,
+            resultSummary: out
+          });
         } else if (fn.name === 'read_file') {
-          out = fs.readFileSync(path.join(REPO_DIR, path.basename(parsedArgs.filepath)), 'utf8');
-          onEvent({ type: 'TOOL_CALL', iteration, reasoning: `Read ${parsedArgs.filepath}`, code: out });
+          const safeFile = path.basename(parsedArgs.filepath || '');
+          const fullPath = path.join(REPO_DIR, safeFile);
+          out = fs.existsSync(fullPath)
+            ? fs.readFileSync(fullPath, 'utf8')
+            : `ERROR: File "${safeFile}" not found in ./repo`;
+          onEvent({
+            schemaVersion: 2,
+            type: 'TOOL_CALL',
+            iteration,
+            tool: 'read_file',
+            toolCallId,
+            args: { filepath: safeFile, bytes: out.length },
+            reasoning: `Read ./repo/${safeFile} (${out.length} bytes)`,
+            code: out
+          });
         } else if (fn.name === 'write_file') {
-          fs.writeFileSync(path.join(REPO_DIR, path.basename(parsedArgs.filepath)), parsedArgs.content, 'utf8');
-          out = JSON.stringify({ patched: parsedArgs.filepath });
-          onEvent({ type: 'TOOL_CALL', iteration, reasoning: `Patched ${parsedArgs.filepath}`, code: parsedArgs.content });
+          const safeFile = path.basename(parsedArgs.filepath || '');
+          const content = parsedArgs.content || '';
+          fs.writeFileSync(path.join(REPO_DIR, safeFile), content, 'utf8');
+          out = JSON.stringify({ patched: safeFile });
+          onEvent({
+            schemaVersion: 2,
+            type: 'TOOL_CALL',
+            iteration,
+            tool: 'write_file',
+            toolCallId,
+            args: { filepath: safeFile, bytes: content.length },
+            reasoning: `Patched ./repo/${safeFile} (${content.length} bytes)`,
+            code: content
+          });
         }
         messages.push({ role: 'tool', tool_call_id: toolCallId, content: out });
         continue;
       }
 
-      console.log(`🛠️  [Tool Call: execute_cpp_code]`);
+      const sourceCode = parsedArgs.cpp_source_code || '';
+      const codeLines = sourceCode ? sourceCode.split('\n').length : 0;
+
+      console.log(`🛠  [Tool Call: execute_cpp_code]`);
       console.log(`   ├─ Reasoning: ${parsedArgs.reasoning}`);
-      console.log(`   └─ Dispatching C++ payload (${parsedArgs.cpp_source_code.length} bytes) to Go Sandbox...`);
+      console.log(`   └─ Dispatching C++ payload (${sourceCode.length} bytes) to Go Sandbox...`);
 
       onEvent({
+        schemaVersion: 2,
         type: 'TOOL_CALL',
         iteration,
+        tool: 'execute_cpp_code',
+        toolCallId,
         reasoning: parsedArgs.reasoning,
-        code: parsedArgs.cpp_source_code,
+        args: {
+          stdin_input: parsedArgs.stdin_input,
+          expected_output: parsedArgs.expected_output,
+          code_bytes: sourceCode.length,
+          code_lines: codeLines
+        },
+        code: sourceCode,
         stdin: parsedArgs.stdin_input,
         expectedOutput: parsedArgs.expected_output
       });
 
-      // 4. Execute C++ code in the Go + Docker + Isolate Sandbox
       const sandboxResult = await callGoSandbox(parsedArgs);
-
-      // if (sandboxResult.passed) {
-      //   isSolved = true;
-      //   console.log(`🟢 [Sandbox Result]: PASSED (${sandboxResult.execution_time_ms}ms)`);
-      // } else {
-      //   console.log(`🔴 [Sandbox Result]: FAILED | Status: ${sandboxResult.status} | Exit Code: ${sandboxResult.exit_code}`);
-      //   if (sandboxResult.stderr) {
-      //     console.log(`   └─ Stderr Trace: ${sandboxResult.stderr.trim().slice(0, 300)}`);
-      //   }
-      // }
 
       if (sandboxResult.passed) {
         isSolved = true;
-        console.log(
-          `🟢 [Sandbox Result]: PASSED (${sandboxResult.execution_time_ms}ms)`
-        );
+        console.log(`🟢 [Sandbox Result]: PASSED (${sandboxResult.execution_time_ms}ms)`);
       } else {
-        console.log(
-          `🔴 [Sandbox Result]: FAILED | Status: ${sandboxResult.status} | Exit Code: ${sandboxResult.exit_code}`
-        );
-
+        console.log(`🔴 [Sandbox Result]: FAILED | Status: ${sandboxResult.status} | Exit Code: ${sandboxResult.exit_code}`);
         if (sandboxResult.stderr) {
           console.log(`   └─ Stderr Trace: ${sandboxResult.stderr.trim().slice(0, 300)}`);
         }
       }
 
       onEvent({
+        schemaVersion: 2,
         type: 'SANDBOX_RESULT',
         iteration,
-        result: sandboxResult
+        result: sandboxResult,
+        sandboxMeta: {
+          language: 'C++20',
+          compiler: 'g++ -std=c++20 -O2',
+          timeLimitMs: 2000,
+          memoryLimitKb: 262144
+        },
+        io: {
+          stdin: parsedArgs.stdin_input || '',
+          expectedOutput: parsedArgs.expected_output || '',
+          actualOutput: (sandboxResult.stdout || '').slice(0, 4000),
+          stderr: (sandboxResult.stderr || '').slice(0, 4000)
+        }
       });
 
-      // 5. Feed the structured execution trace back into the LLM's context window
       const toolFeedbackPayload = formatSandboxFeedback(sandboxResult);
-
       messages.push({
         role: 'tool',
         tool_call_id: toolCallId,
         content: toolFeedbackPayload
       });
 
-      // STOP immediately when the sandbox verifies the solution
       if (sandboxResult.passed) {
-        console.log(
-          '[Agent] Verified solution found. Stopping further API calls.'
-        );
-
+        console.log('[Agent] Verified solution found. Stopping further API calls.');
         const finalAnswer =
           parsedArgs.cpp_source_code ||
           assistantMessage.content ||
           'The C++ solution passed sandbox verification.';
 
         onEvent({
+          schemaVersion: 2,
           type: 'FINAL_ANSWER',
           iteration,
           solved: true,
-          content: finalAnswer,
+          summary: `Verified C++20 solution passed all sandbox tests in ${sandboxResult.execution_time_ms || 0}ms on Iteration ${iteration}.`,
+          content: finalAnswer
         });
 
         return {
           success: true,
           iterationsUsed: iteration,
           finalAnswer,
-          history: messages,
+          history: messages
         };
       }
+    }
+  }
 
-    } // End of for (const toolCall ...)
-  }   // End of while (iteration < MAX_ITERATIONS)
-
-  // 6. Guardrail triggered: Max iterations exhausted without convergence
-  console.warn(
-    `\n⛔ [Guardrail Triggered]: Reached MAX_ITERATIONS (${MAX_ITERATIONS}) without final termination.`
-  );
+  console.warn(`\n⛔️ [Guardrail Triggered]: Reached MAX_ITERATIONS (${MAX_ITERATIONS}) without final termination.`);
 
   onEvent({
+    schemaVersion: 2,
     type: 'MAX_ITERATIONS_REACHED',
+    iteration: MAX_ITERATIONS,
     maxIterations: MAX_ITERATIONS,
-    solved: isSolved
+    solved: isSolved,
+    message: `Reached maximum limit of ${MAX_ITERATIONS} iterations without passing verification.`
   });
 
   return {
@@ -438,9 +470,7 @@ export async function runAgentLoop(problemPrompt, onEvent = () => { }) {
   };
 }
 
-
 // --- CLI Smoke Test Entrypoint ---
-// Runs only when executing `node agent.js` directly in your terminal
 if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}` || process.argv[1]?.endsWith('agent.js')) {
   const sampleProblem = `
 Problem: Find the Maximum Subarray Sum (Kadane's Algorithm) with 64-bit integers.

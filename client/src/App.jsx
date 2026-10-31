@@ -65,9 +65,9 @@ const PRESETS = [
     id: 'custom',
     title: 'Custom Problem',
     subtitle: '',
-    prompt: 'Write a C++20 program that reads N integers, and prints the maximum contiguous subarray sum.',
-    stdin: '5\n1 2 -3 4 5',
-    expected: '9'
+    // prompt: 'Write a C++20 program that reads N integers, and prints the maximum contiguous subarray sum.',
+    // stdin: '5\n1 2 -3 4 5',
+    // expected: '9'
   },
   {
     id: 'repo',
@@ -429,14 +429,21 @@ export default function App() {
           ]);
           setRunning(false);
         }
+
+        //  } else if (data.type === 'FINAL_ANSWER') {
+
       } else if (data.type === 'FINAL_ANSWER') {
+        const isSolved = Boolean(data.solved);
         setTraceItems((prev) => [
           ...prev,
           {
             timestamp: now,
-            title: 'Task completed',
-            detail: 'Solution passed all test cases.',
-            done: true
+            title: isSolved ? 'Task completed' : 'Agent loop finished (Unverified)',
+            detail: isSolved
+              ? 'Solution passed all test cases.'
+              : 'Agent stopped without passing sandbox verification.',
+            done: true,
+            failed: !isSolved
           }
         ]);
         const presetObj = PRESETS.find((p) => p.id === activePreset);
@@ -444,11 +451,90 @@ export default function App() {
           {
             name: presetObj ? presetObj.title : 'Custom problem',
             date: `Oct 26, 2025  ${now.slice(0, 5)}`,
-            status: data.solved !== false ? 'success' : 'failed'
+            status: isSolved ? 'success' : 'failed'
           },
           ...prev.slice(0, 2)
         ]);
         setRunning(false);
+        es.close();
+      } else if (data.type === 'MAX_ITERATIONS_REACHED') {
+        setTraceItems((prev) => [
+          ...prev,
+          {
+            timestamp: now,
+            title: 'Max iterations reached',
+            detail: data.message || 'Reached maximum iterations without passing verification.',
+            done: true,
+            failed: true
+          }
+        ]);
+        setRunning(false);
+        // es.close();
+
+        const isSolved = Boolean(data.solved);
+        setTraceItems((prev) => [
+          ...prev,
+          {
+            timestamp: now,
+            title: isSolved ? 'Task completed' : 'Agent loop finished (Unverified)',
+            detail: isSolved
+              ? 'Solution passed all test cases.'
+              : 'Agent stopped without passing sandbox verification.',
+            done: true,
+            failed: !isSolved
+          }
+        ]);
+        const presetObj = PRESETS.find((p) => p.id === activePreset);
+        setRecentRuns((prev) => [
+          {
+            name: presetObj ? presetObj.title : 'Custom problem',
+            date: `Oct 26, 2025  ${now.slice(0, 5)}`,
+            status: isSolved ? 'success' : 'failed'
+          },
+          ...prev.slice(0, 2)
+        ]);
+        setRunning(false);
+        es.close();
+      } else if (data.type === 'MAX_ITERATIONS_REACHED') {
+        setTraceItems((prev) => [
+          ...prev,
+          {
+            timestamp: now,
+            title: 'Max iterations reached',
+            detail: data.message || 'Reached maximum iterations without passing verification.',
+            done: true,
+            failed: true
+          }
+        ]);
+        setRunning(false);
+        es.close();
+        const solved = data.solved === true;
+
+        setTraceItems((prev) => [
+          ...prev,
+          {
+            timestamp: now,
+            title: solved ? 'Task completed' : 'Task failed',
+            detail: solved
+              ? 'Solution passed all test cases.'
+              : 'Agent finished without successfully passing all test cases.',
+            done: solved
+          }
+        ]);
+
+        const presetObj = PRESETS.find((p) => p.id === activePreset);
+
+        setRecentRuns((prev) => [
+          {
+            name: presetObj ? presetObj.title : 'Custom problem',
+            date: `Oct 26, 2025  ${now.slice(0, 5)}`,
+            status: solved ? 'success' : 'failed'
+          },
+          ...prev.slice(0, 2)
+        ]);
+
+        setRunning(false);
+
       } else if (data.type === 'ERROR') {
         setTraceItems((prev) => [
           ...prev,
@@ -460,10 +546,30 @@ export default function App() {
       }
     };
 
+    // } else if (data.type === 'FINAL_ANSWER') {
+    //   setTraceItems((prev) => [
+    //     ...prev,
+    //     {
+    //       timestamp: now,
+    //       title: 'Task completed',
+    //       detail: 'Solution passed all test cases.',
+    //       done: true
+    //     }
+    //   ]);
+    //   const presetObj = PRESETS.find((p) => p.id === activePreset);
+    //   setRecentRuns((prev) => [
+    //     {
+    //       name: presetObj ? presetObj.title : 'Custom problem',
+    //       date: `Oct 26, 2025  ${now.slice(0, 5)}`,
+    //       status: data.solved !== false ? 'success' : 'failed'
+    //     },
+    //     ...prev.slice(0, 2)
+    //   ]);
+    //   setRunning(false);
     try {
       const response = await fetch('http://localhost:3001/api/agent/stream', {
         method: 'POST',
-         credentials: 'include',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: fullPrompt,
@@ -583,6 +689,7 @@ export default function App() {
         </div>
 
         <div className="topbar-right">
+          
           <button className="gear-btn" title="Settings">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="3" />
@@ -697,7 +804,7 @@ export default function App() {
               <div className="section-label-row">
                 {/* <span className="section-label">Recent Runs</span> */}
               </div>
-              <div className="recent-stack">
+              {/* <div className="recent-stack">
                 {recentRuns.map((item, i) => (
                   <div key={i} className="recent-row">
                     <span className={`recent-ring ${item.status}`} />
@@ -707,7 +814,7 @@ export default function App() {
                     </div>
                   </div>
                 ))}
-              </div>
+              </div> */}
             </div>
 
             {/* BOTTOM-LEFT GOLDEN SILK WAVE ARTWORK (Matches Reference Image) */}
@@ -847,6 +954,42 @@ export default function App() {
                   {traceItems.map((item, idx) => {
                     if (item.done) {
                       return (
+                        <div
+                          key={idx}
+                          className="trace-completed-banner"
+                          style={
+                            item.failed
+                              ? { borderColor: '#78352d', background: 'rgba(43, 21, 18, 0.65)' }
+                              : undefined
+                          }
+                        >
+                          <div
+                            className="completed-check"
+                            style={
+                              item.failed
+                                ? { background: '#ff8378', color: '#1a0b09' }
+                                : undefined
+                            }
+                          >
+                            {item.failed ? '✕' : '✔'}
+                          </div>
+                          <span className="trace-time">{item.timestamp}</span>
+                          <div className="completed-text">
+                            <div
+                              className="completed-title"
+                              style={item.failed ? { color: '#ff8378' } : undefined}
+                            >
+                              {item.title}
+                            </div>
+                            <div className="completed-sub">{item.detail}</div>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    {/* {traceItems.map((item, idx) => {
+                    if (item.done) {
+                      return (
                         <div key={idx} className="trace-completed-banner">
                           <div className="completed-check">✔</div>
                           <span className="trace-time">{item.timestamp}</span>
@@ -856,7 +999,7 @@ export default function App() {
                           </div>
                         </div>
                       );
-                    }
+                    } */}
                     return (
                       <div key={idx} className="trace-row">
                         <div className="trace-rail">

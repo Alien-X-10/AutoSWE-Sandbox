@@ -219,50 +219,133 @@ app.post('/api/agent/stream', async (req, res) => {
     model: process.env.LLM_MODEL
   });
 
+  // let run = null;
+  // try {
+  //   console.log('[AUTH DEBUG] Session ID:', req.sessionID);
+  //   console.log('[AUTH DEBUG] User ID:', req.session?.userId);
+  //   run = await createRun(prompt, req.session?.userId || null);
+
+  //   // Execute the agent and stream its events.
+  //   const finalSummary = await runAgentLoop(prompt, (agentEvent) => {
+  //     if (!isClientConnected) return;
+
+  //     // Keep the existing SSE event names unchanged.
+  //     sendSSE(res, agentEvent.type, agentEvent);
+
+  //     // Persist the event without blocking the SSE stream.
+  //     saveRunEvent(run.id, agentEvent).catch((error) => {
+  //       console.error('[Database] Failed to save agent event:', error.message);
+  //     });
+  //   });
+
+  //   // Save the final run status.
+  //   await finishRun(run.id, {
+  //     status: finalSummary.success ? 'passed' : 'failed',
+  //     iterations: finalSummary.iterationsUsed,
+  //     finalAnswer: finalSummary.finalAnswer,
+  //   });
+
+  //   // Send the existing completion event.
+  //   if (isClientConnected) {
+  //     sendSSE(res, 'STREAM_COMPLETE', {
+  //       type: 'STREAM_COMPLETE',
+  //       success: finalSummary.success,
+  //       iterationsUsed: finalSummary.iterationsUsed,
+  //       finalAnswer: finalSummary.finalAnswer,
+  //     });
+  //   }
+  // } catch (error) {
+  //   console.error('💥 [Orchestrator Stream Error]:', error.message);
+
+  //   // Mark the run as errored if a database record was created.
+  //   if (run) {
+  //     try {
+  //       await finishRun(run.id, {
+  //         status: 'error',
+  //         iterations: 0,
+  //         finalAnswer: error.message,
+  //       });
+  //     } catch (dbError) {
+  //       console.error('[Database] Failed to update run:', dbError.message);
+  //     }
+  //   }
+
+  //   if (isClientConnected) {
+  //     sendSSE(res, 'ERROR', {
+  //       type: 'ERROR',
+  //       message: error.message || 'Unexpected error during agent execution.',
+  //     });
+  //   }
+  // }
+
+
   let run = null;
+  let lastIteration = 0;
   try {
-    console.log('[AUTH DEBUG] Session ID:', req.sessionID);
-    console.log('[AUTH DEBUG] User ID:', req.session?.userId);
     run = await createRun(prompt, req.session?.userId || null);
 
-    // Execute the agent and stream its events.
+    // Persist SYSTEM_READY to agent_events
+    await saveRunEvent(run.id, {
+      schemaVersion: 2,
+      type: 'SYSTEM_READY',
+      iteration: 0,
+      message: 'Connected to Autonomous SWE Orchestrator. Initializing ReAct loop...',
+      model: process.env.LLM_MODEL || 'gpt-4o',
+      maxIterations: parseInt(process.env.MAX_ITERATIONS || '5', 10),
+    });
+
+    // Execute the agent and stream + persist its events
     const finalSummary = await runAgentLoop(prompt, (agentEvent) => {
-      if (!isClientConnected) return;
+      if (agentEvent.iteration) lastIteration = agentEvent.iteration;
 
-      // Keep the existing SSE event names unchanged.
-      sendSSE(res, agentEvent.type, agentEvent);
+      if (isClientConnected) {
+        sendSSE(res, agentEvent.type, agentEvent);
+      }
 
-      // Persist the event without blocking the SSE stream.
+      // Always persist event even if browser tab disconnected
       saveRunEvent(run.id, agentEvent).catch((error) => {
         console.error('[Database] Failed to save agent event:', error.message);
       });
     });
 
-    // Save the final run status.
+    // Save the final run status
     await finishRun(run.id, {
       status: finalSummary.success ? 'passed' : 'failed',
       iterations: finalSummary.iterationsUsed,
       finalAnswer: finalSummary.finalAnswer,
     });
 
-    // Send the existing completion event.
+    const completeEvent = {
+      schemaVersion: 2,
+      type: 'STREAM_COMPLETE',
+      iteration: finalSummary.iterationsUsed,
+      success: finalSummary.success,
+      status: finalSummary.success ? 'passed' : 'failed',
+      iterationsUsed: finalSummary.iterationsUsed,
+      finalAnswer: finalSummary.finalAnswer,
+    };
+
+    await saveRunEvent(run.id, completeEvent);
+
     if (isClientConnected) {
-      sendSSE(res, 'STREAM_COMPLETE', {
-        type: 'STREAM_COMPLETE',
-        success: finalSummary.success,
-        iterationsUsed: finalSummary.iterationsUsed,
-        finalAnswer: finalSummary.finalAnswer,
-      });
+      sendSSE(res, 'STREAM_COMPLETE', completeEvent);
     }
   } catch (error) {
     console.error('💥 [Orchestrator Stream Error]:', error.message);
 
-    // Mark the run as errored if a database record was created.
+    const errorEvent = {
+      schemaVersion: 2,
+      type: 'ERROR',
+      iteration: lastIteration,
+      message: error.message || 'Unexpected error during agent execution.',
+    };
+
     if (run) {
       try {
+        await saveRunEvent(run.id, errorEvent);
         await finishRun(run.id, {
           status: 'error',
-          iterations: 0,
+          iterations: lastIteration,
           finalAnswer: error.message,
         });
       } catch (dbError) {
@@ -271,13 +354,9 @@ app.post('/api/agent/stream', async (req, res) => {
     }
 
     if (isClientConnected) {
-      sendSSE(res, 'ERROR', {
-        type: 'ERROR',
-        message: error.message || 'Unexpected error during agent execution.',
-      });
+      sendSSE(res, 'ERROR', errorEvent);
     }
   }
-
 
   finally {
     clearInterval(heartbeatTimer);
