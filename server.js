@@ -435,6 +435,14 @@ app.post('/api/v1/mock-execute', async (req, res) => {
   });
 });
 
+// Health Check
+app.get('/api/health', (req, res) => {
+    res.status(200).json({
+        status: 'OK',
+        message: 'AutoSWE Sandbox API is running'
+    });
+});
+
 // Start Express Server
 app.listen(PORT, () => {
   console.log(`\n=============================================================`);
