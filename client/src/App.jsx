@@ -145,8 +145,9 @@ export default function App() {
   //     Boolean(localStorage.getItem('autoswe_user'))
   // );
 
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
 
   useEffect(() => {
     const handleHashChange = () => {
@@ -170,9 +171,17 @@ export default function App() {
           }
         );
 
-        setIsAuthenticated(response.ok);
+        if (response.ok) {
+          const data = await response.json();
+          setCurrentUser(data.user || null);
+          setIsAuthenticated(true);
+        } else {
+          setCurrentUser(null);
+          setIsAuthenticated(false);
+        }
       } catch (error) {
         console.error('Session check failed:', error);
+        setCurrentUser(null);
         setIsAuthenticated(false);
       } finally {
         setAuthChecking(false);
@@ -180,40 +189,12 @@ export default function App() {
     };
 
     checkSession();
-  }, []);
+  }, [isAuthenticated]);
 
   const [activePreset, setActivePreset] = useState('custom');
   const [description, setDescription] = useState(PRESETS[0].prompt);
   const [stdinInput, setStdinInput] = useState(PRESETS[0].stdin);
   const [expectedOutput, setExpectedOutput] = useState(PRESETS[0].expected);
-
-  // const [running, setRunning] = useState(false);
-  // const [traceItems, setTraceItems] = useState(INITIAL_EVENTS);
-  // const [generatedCode, setGeneratedCode] = useState(INITIAL_CODE);
-  // const [codeVersions, setCodeVersions] = useState({ 1: INITIAL_CODE });
-  // const [viewingIteration, setViewingIteration] = useState(1);
-  // const [showDiff, setShowDiff] = useState(false);
-
-  // const [activeTab, setActiveTab] = useState('terminal');
-  // const [sandboxSummary, setSandboxSummary] = useState({
-  //   passed: true,
-  //   statusText: 'Output matches expected result.',
-  //   compileTime: '0.18s',
-  //   runTime: '0.01s',
-  //   memory: '3.2 MB',
-  //   stdin: '5\n1 2 -3 4 5',
-  //   expected: '9',
-  //   actual: '9',
-  //   stderr: ''
-  // });
-  // const [rawOutput, setRawOutput] = useState({
-  //   passed: true,
-  //   status: 'ACCEPTED',
-  //   exit_code: 0,
-  //   execution_time_ms: 10,
-  //   stdout: '9\n'
-  // });
-
   const [running, setRunning] = useState(false);
   const [traceItems, setTraceItems] = useState([]);
   const [generatedCode, setGeneratedCode] = useState('');
@@ -689,6 +670,17 @@ export default function App() {
         </div>
 
         <div className="topbar-right">
+          {currentUser?.name && (
+            <div
+              className="user-profile-pill"
+              title={`Signed in as ${currentUser.name} (${currentUser.email})`}
+            >
+              <span className="user-avatar-circle">
+                {currentUser.name.trim().charAt(0).toUpperCase()}
+              </span>
+              <span className="user-display-name">{currentUser.name}</span>
+            </div>
+          )}
           
           <button className="gear-btn" title="Settings">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
