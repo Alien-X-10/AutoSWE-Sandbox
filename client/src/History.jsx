@@ -152,7 +152,7 @@ export default function History() {
             try {
                 setEventsLoading(true);
                 const response = await fetch(
-                    `http://localhost:3001/api/agent/runs/${selectedRun.id}/events`,
+                    `/api/agent/runs/${selectedRun.id}/events`,
                     { credentials: 'include' }
                 );
 
@@ -176,7 +176,7 @@ export default function History() {
     useEffect(() => {
         async function fetchRuns() {
             try {
-                const response = await fetch('http://localhost:3001/api/agent/runs', {
+                const response = await fetch('/api/agent/runs', {
                     credentials: 'include',
                 });
 

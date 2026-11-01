@@ -165,7 +165,7 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
     const checkSession = async () => {
       try {
         const response = await fetch(
-          'http://localhost:3001/api/auth/me',
+          '/api/auth/me',
           {
             credentials: 'include',
           }
@@ -228,9 +228,9 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
         setHistoryLoading(true);
         setHistoryError('');
 
-        // const response = await fetch('http://localhost:3001/api/agent/runs');
+        // const response = await fetch('/api/agent/runs');
         const response = await fetch(
-          'http://localhost:3001/api/agent/runs',
+          '/api/agent/runs',
           {
             credentials: 'include',
           }
@@ -548,7 +548,7 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
     //   ]);
     //   setRunning(false);
     try {
-      const response = await fetch('http://localhost:3001/api/agent/stream', {
+      const response = await fetch('/api/agent/stream', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -598,7 +598,7 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
           {
             timestamp: now,
             title: 'Connection Error',
-            detail: `Failed to reach http://localhost:3001/api/agent/stream (${err.message})`,
+            detail: `Failed to reach /api/agent/stream (${err.message})`,
             done: false
           }
         ]);
@@ -705,7 +705,7 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
             onClick={async () => {
               try {
                 const response = await fetch(
-                  'http://localhost:3001/api/auth/logout',
+                  '/api/auth/logout',
                   {
                     method: 'POST',
                     credentials: 'include',

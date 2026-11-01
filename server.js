@@ -383,7 +383,7 @@ app.get('/api/agent/stream', async (req, res) => {
 /**
  * 5. Built-in Mock Sandbox Endpoint (POST /api/v1/mock-execute)
  * Allows you to test the ReAct loop & SSE streaming immediately even if the Go Docker container isn't running yet.
- * To use this mock, temporarily set SANDBOX_API_URL=http://localhost:3001/api/v1/mock-execute in your .env
+ * To use this mock, temporarily set SANDBOX_API_URL=/api/v1/mock-execute in your .env
  */
 app.post('/api/v1/mock-execute', async (req, res) => {
 

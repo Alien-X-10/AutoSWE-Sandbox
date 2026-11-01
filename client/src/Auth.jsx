@@ -62,8 +62,8 @@ export default function Auth({ onAuthSuccess, onNavigateAbout }) {
     try {
       const endpoint =
         mode === 'register'
-          ? 'http://localhost:3001/api/auth/register'
-          : 'http://localhost:3001/api/auth/login';
+          ? '/api/auth/register'
+          : '/api/auth/login';
 
       // const res = await fetch(endpoint, {
       //   method: 'POST',

@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://autoswe-sandbox.onrender.com/api/:path*"
+    }
+  ]
+}

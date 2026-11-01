@@ -77,7 +77,7 @@ const ARCHITECTURE_LAYERS = [
     name: 'The Manager (Node.js ReAct Orchestrator)',
     simple: 'Think of this as the project manager. It passes messages between the AI Brain, your local ./repo files, the Docker test room, and your browser screen.',
     specs: [
-      'Files: server.js + agent.js running on http://localhost:3001',
+      'Files: server.js + agent.js running on ',
       'Enforces MAX_ITERATIONS = 5 and early loop termination on PASSED',
       'Built-in 21-second (5 RPM) rate-limiter queue preventing HTTP 429 errors',
       'Streams real-time telemetry frames over Server-Sent Events (SSE)'
