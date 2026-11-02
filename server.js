@@ -25,8 +25,15 @@ const sessionStore = new PgSession({
   pruneSessionInterval: 15 * 60,
 });
 
+app.set('trust proxy', 1);
+
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://autoswe-sandbox-client-5fy9sbfm8-diamond-head.vercel.app'
+];
+
 app.use(cors({
-  origin: 'http://localhost:5173',
+  origin: allowedOrigins,
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -48,6 +55,8 @@ app.use(session({
 }));
 
 app.use('/api/auth', authRouter);
+
+
 
 app.get('/api/agent/runs', async (req, res) => {
   // Verify authentication

@@ -145,7 +145,7 @@ export default function App() {
   //     Boolean(localStorage.getItem('autoswe_user'))
   // );
 
-const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
 
@@ -164,12 +164,20 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
   useEffect(() => {
     const checkSession = async () => {
       try {
-        const response = await fetch(
-          '/api/auth/me',
-          {
-            credentials: 'include',
+        // In App.jsx (around line 167)
+        const response = await fetch('/api/auth/me', {
+          method: 'GET',
+          credentials: 'include', // <--- Add this exact line
+          headers: {
+            'Content-Type': 'application/json'
           }
-        );
+        });
+        // const response = await fetch(
+        //   '/api/auth/me',
+        //   {
+        //     credentials: 'include',
+        //   }
+        // );
 
         if (response.ok) {
           const data = await response.json();
@@ -229,12 +237,20 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
         setHistoryError('');
 
         // const response = await fetch('/api/agent/runs');
-        const response = await fetch(
-          '/api/agent/runs',
-          {
-            credentials: 'include',
+        // In App.jsx (around line 240)
+        const response = await fetch('/api/agent/runs', {
+          method: 'GET',
+          credentials: 'include', // <--- Add this exact line
+          headers: {
+            'Content-Type': 'application/json'
           }
-        );
+        });
+        // const response = await fetch(
+        //   '/api/agent/runs',
+        //   {
+        //     credentials: 'include',
+        //   }
+        // );
 
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
@@ -360,7 +376,8 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
             done: false
           }
         ]);
-      } else if (data.type === 'SANDBOX_RESULT') {
+
+        } else if (data.type === 'SANDBOX_RESULT') {
         const r = data.result || {};
         const passed = Boolean(r.passed);
         setRawOutput(r);
@@ -381,21 +398,21 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
           ...prev,
           {
             timestamp: now,
-            title: `Executed test case (${r.status || 'DONE'})`,
+            title: `Executed test case (${r.status || 'ACCEPTED'})`,
             detail: passed
               ? `Ran in ${r.execution_time_ms || 0}ms. Output matches expected result.`
               : `Sandbox reported ${r.status || 'error'}. Self-healing...`,
             done: false
           },
-          ...(passed
+          ...(passed && !prev.some((item) => item.done)
             ? [
-              {
-                timestamp: now,
-                title: 'Task completed',
-                detail: 'Solution passed all test cases.',
-                done: true
-              }
-            ]
+                {
+                  timestamp: now,
+                  title: 'Task completed',
+                  detail: 'Solution passed all test cases.',
+                  done: true
+                }
+              ]
             : [])
         ]);
         if (passed) {
@@ -410,46 +427,131 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
           ]);
           setRunning(false);
         }
-
-        //  } else if (data.type === 'FINAL_ANSWER') {
-
       } else if (data.type === 'FINAL_ANSWER') {
         const isSolved = Boolean(data.solved);
-        setTraceItems((prev) => [
-          ...prev,
-          {
-            timestamp: now,
-            title: isSolved ? 'Task completed' : 'Agent loop finished (Unverified)',
-            detail: isSolved
-              ? 'Solution passed all test cases.'
-              : 'Agent stopped without passing sandbox verification.',
-            done: true,
-            failed: !isSolved
-          }
-        ]);
-        const presetObj = PRESETS.find((p) => p.id === activePreset);
-        setRecentRuns((prev) => [
-          {
-            name: presetObj ? presetObj.title : 'Custom problem',
-            date: `Oct 26, 2025  ${now.slice(0, 5)}`,
-            status: isSolved ? 'success' : 'failed'
-          },
-          ...prev.slice(0, 2)
-        ]);
+        setTraceItems((prev) => {
+          // Prevent duplicate "Task completed" banner if SANDBOX_RESULT already added it
+          if (prev.some((item) => item.done)) return prev;
+          return [
+            ...prev,
+            {
+              timestamp: now,
+              title: isSolved ? 'Task completed' : 'Agent loop finished (Unverified)',
+              detail: isSolved
+                ? 'Solution passed all test cases.'
+                : 'Agent stopped without passing sandbox verification.',
+              done: true,
+              failed: !isSolved
+            }
+          ];
+        });
         setRunning(false);
-        es.close();
       } else if (data.type === 'MAX_ITERATIONS_REACHED') {
-        setTraceItems((prev) => [
-          ...prev,
-          {
-            timestamp: now,
-            title: 'Max iterations reached',
-            detail: data.message || 'Reached maximum iterations without passing verification.',
-            done: true,
-            failed: true
-          }
-        ]);
+        setTraceItems((prev) => {
+          if (prev.some((item) => item.done)) return prev;
+          return [
+            ...prev,
+            {
+              timestamp: now,
+              title: 'Max iterations reached',
+              detail: data.message || 'Reached maximum iterations without passing verification.',
+              done: true,
+              failed: true
+            }
+          ];
+        });
         setRunning(false);
+      
+      // } else if (data.type === 'SANDBOX_RESULT') {
+      //   const r = data.result || {};
+      //   const passed = Boolean(r.passed);
+      //   setRawOutput(r);
+      //   setSandboxSummary({
+      //     passed,
+      //     statusText: passed
+      //       ? 'Output matches expected result.'
+      //       : `Status: ${r.status || 'FAILED'}`,
+      //     compileTime: '0.18s',
+      //     runTime: `${((r.execution_time_ms || 10) / 1000).toFixed(2)}s`,
+      //     memory: '3.2 MB',
+      //     stdin: stdinInput,
+      //     expected: expectedOutput,
+      //     actual: (r.stdout || '').trim(),
+      //     stderr: r.stderr || ''
+      //   });
+      //   setTraceItems((prev) => [
+      //     ...prev,
+      //     {
+      //       timestamp: now,
+      //       title: `Executed test case (${r.status || 'DONE'})`,
+      //       detail: passed
+      //         ? `Ran in ${r.execution_time_ms || 0}ms. Output matches expected result.`
+      //         : `Sandbox reported ${r.status || 'error'}. Self-healing...`,
+      //       done: false
+      //     },
+      //     ...(passed
+      //       ? [
+      //         {
+      //           timestamp: now,
+      //           title: 'Task completed',
+      //           detail: 'Solution passed all test cases.',
+      //           done: true
+      //         }
+      //       ]
+      //       : [])
+      //   ]);
+      //   if (passed) {
+      //     const presetObj = PRESETS.find((p) => p.id === activePreset);
+      //     setRecentRuns((prev) => [
+      //       {
+      //         name: presetObj ? presetObj.title : 'Custom problem',
+      //         date: `Oct 26, 2025  ${now.slice(0, 5)}`,
+      //         status: 'success'
+      //       },
+      //       ...prev.slice(0, 2)
+      //     ]);
+      //     setRunning(false);
+      //   }
+
+      //   //  } else if (data.type === 'FINAL_ANSWER') {
+
+      // } else if (data.type === 'FINAL_ANSWER') {
+      //   const isSolved = Boolean(data.solved);
+      //   setTraceItems((prev) => [
+      //     ...prev,
+      //     {
+      //       timestamp: now,
+      //       title: isSolved ? 'Task completed' : 'Agent loop finished (Unverified)',
+      //       detail: isSolved
+      //         ? 'Solution passed all test cases.'
+      //         : 'Agent stopped without passing sandbox verification.',
+      //       done: true,
+      //       failed: !isSolved
+      //     }
+      //   ]);
+      //   const presetObj = PRESETS.find((p) => p.id === activePreset);
+      //   setRecentRuns((prev) => [
+      //     {
+      //       name: presetObj ? presetObj.title : 'Custom problem',
+      //       date: `Oct 26, 2025  ${now.slice(0, 5)}`,
+      //       status: isSolved ? 'success' : 'failed'
+      //     },
+      //     ...prev.slice(0, 2)
+      //   ]);
+      //   setRunning(false);
+      //   es.close();
+      // } else if (data.type === 'MAX_ITERATIONS_REACHED') {
+      //   setTraceItems((prev) => [
+      //     ...prev,
+      //     {
+      //       timestamp: now,
+      //       title: 'Max iterations reached',
+      //       detail: data.message || 'Reached maximum iterations without passing verification.',
+      //       done: true,
+      //       failed: true
+      //     }
+      //   ]);
+      //   setRunning(false);
         // es.close();
 
         const isSolved = Boolean(data.solved);
@@ -681,7 +783,7 @@ const [isAuthenticated, setIsAuthenticated] = useState(false);
               <span className="user-display-name">{currentUser.name}</span>
             </div>
           )}
-          
+
           <button className="gear-btn" title="Settings">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="3" />
