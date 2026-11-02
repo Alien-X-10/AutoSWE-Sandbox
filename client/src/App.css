@@ -1212,3 +1212,37 @@ html, body, #root {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+
+/* ================= SHOW / HIDE PASSWORD TOGGLE ================= */
+.auth-password-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.auth-password-input {
+  width: 100%;
+  padding-right: 42px;
+}
+
+.auth-eye-btn {
+  position: absolute;
+  right: 10px;
+  background: transparent;
+  border: none;
+  color: #a89f8d;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 6px;
+  transition: color 0.18s ease, background 0.18s ease;
+}
+
+.auth-eye-btn:hover {
+  color: #f8db89;
+  background: rgba(248, 219, 137, 0.08);
+}
