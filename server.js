@@ -10,6 +10,7 @@ import {
   finishRun,
 } from './runStore.js';
 import { pool } from './db.js';
+import './sandbox/sandbox-server.js';
 
 import authRouter from './auth.js';
 dotenv.config();

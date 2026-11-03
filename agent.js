@@ -29,7 +29,7 @@ const openai = new OpenAI({
 
 // Shared 21s Rate Limiter
 const LIMIT_FILE = path.join(os.tmpdir(), 'autoswe_ratelimit.txt');
-const REQUEST_GAP_MS = 21_000; // Max ~2.8 requests/min (< 5 RPM limit)
+const REQUEST_GAP_MS = 13_000; // Max ~2.8 requests/min (< 5 RPM limit)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let requestQueue = Promise.resolve();
 
